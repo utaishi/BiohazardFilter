@@ -1,0 +1,208 @@
+%%% MATLAB code for applying "whisperization" effect to speech.
+%%%
+%%% Phase of spectrogram is replaced by random values.
+
+%% setting parameter
+
+winLength = 128; % length of window function
+
+
+%% calculate parameter
+
+winShift = winLength/min(8,winLength); % shifting width of window
+
+
+%% read MTLB speech file
+
+load mtlb
+
+fs = Fs;
+[z,p,k] = cheby2(5,40,2*50/fs,'high'); % 50 Hz high-pass filter
+[sos,g] = zp2sos(z,p,k); % cascaded biquad form (IIR filter)
+
+% h = fvtool(sos); h.Fs = fs;
+
+data = filtfilt(sos,g,mtlb); % filter out low frequency components
+
+figure, plot(data,'linewidth',2), grid on
+
+clear mtlb Fs
+
+
+%% listen to MTLB
+
+soundsc(data,fs)
+pause(1)
+
+%% calculate spectrogram
+
+win = blackman(winLength,'periodic'); % set window function
+
+zeroPadData = [zeros(winLength,1); data; zeros(winLength,1)]; % zero padding
+
+timeSegmentNum = floor((length(zeroPadData)-winLength)/winShift); % calculate number of time segments
+
+spec = zeros(winLength,timeSegmentNum); % initialize spectrogram
+t = 1:winLength; % time index to be updated inside for loop
+
+for n = 1:timeSegmentNum
+    spec(:,n) = fft(fftshift(win.*zeroPadData(t))); % substitute spectrum into spectrogram
+    t = t + winShift; % update time index (data shifting)
+end
+
+figure, imagesc([0 winShift*timeSegmentNum/fs],[0 fs/2],20*log10(abs(spec(1:floor(size(spec,1)/2)+1,:))))
+colorbar, axis xy, xlabel 'Time [s]', ylabel 'Frequency [Hz]'
+minMaxColor = caxis;
+caxis(max(minMaxColor)+[-80 0])
+
+
+%% modify spectrogram (set all phase randomly)
+
+ampSpec = abs(spec);     % amplitude spectrogram
+phaseSpec = angle(spec); % phase spectrogram
+
+randomPhase = 2*pi*rand(size(spec)); % phase spectrogram with random values
+
+newSpec = ampSpec .* exp(1i*randomPhase); % replace phase by random values
+
+
+%% construct canonical dual window
+
+dualWin = zeros(size(win)); % initialize dual window
+
+for n = 1:length(dualWin)
+    dualWin(n) = win(n) / (winLength*sum(abs(win((mod(n-1,winShift)+1):winShift:end)).^2)); % calculate canonical dual window
+end
+
+figure, plot([win dualWin/max(dualWin)],'linewidth',2), grid on
+
+
+%% calculate inverse short-time Fourier transform
+
+result = zeros(length(zeroPadData),1); % initialize time signal
+t = 1:winLength; % time index to be updated inside for loop
+
+for n = 1:timeSegmentNum
+    result(t) = result(t) + dualWin.*ifftshift(ifft(newSpec(:,n),'symmetric'))*winLength; % inverse STFT
+    t = t + winShift; % update time index (data shifting)
+end
+
+result(1:winLength) = [];         % delete padded zeros at beginning
+result(end-winLength+1:end) = []; % delete padded zeros at end
+
+figure, plot(result,'linewidth',2), grid on
+figure, spectrogram(result,win,(7/8)*winLength,max(2^12,winLength),fs,'yaxis'), minMaxColor = caxis; caxis(max(minMaxColor)+[-80 0])
+
+
+%% listen to whisperized MTLB
+
+soundsc(result,fs)
+pause(1)
+
+%% setting parameter
+
+timeStretchFactor = 4; % only integers are allowed for this simple code
+iterationNumber = 100; % number of iteration in Griffin-Lim algorithm
+
+
+%% calculate parameter
+
+winLength2 = 256; % length of window function
+winShift2 = winLength2/(8*round(timeStretchFactor/2)); % shifting width of window
+
+
+%% read MTLB speech file
+
+load mtlb
+
+fs = Fs;
+[z,p,k] = cheby2(5,40,2*50/fs,'high'); % 50 Hz high-pass filter
+[sos,g] = zp2sos(z,p,k); % cascaded biquad form (IIR filter)
+
+% h = fvtool(sos); h.Fs = fs;
+
+%%data2 = filtfilt(sos,g,mtlb); % filter out low frequency components
+data2 = filtfilt(sos,g,result);
+figure, plot(data,'linewidth',2), grid on
+
+clear mtlb Fs
+
+
+%% calculate spectrogram
+
+win = blackman(winLength2,'periodic'); % set window function
+
+zeroPadData = [zeros(winLength2,1); data2; zeros(winLength2,1)]; % zero padding
+
+timeSegmentNum = floor((length(zeroPadData)-winLength2)/winShift2); % calculate number of time segments
+
+spec = zeros(winLength2,timeSegmentNum); % initialize spectrogram
+t = 1:winLength2; % time index to be updated inside for loop
+
+for n = 1:timeSegmentNum
+    spec(:,n) = fft(fftshift(win.*zeroPadData(t))); % substitute spectrum into spectrogram
+    t = t + winShift2; % update time index (data shifting)
+end
+
+figure, imagesc([0 winShift*timeSegmentNum/fs],[0 fs/2],20*log10(abs(spec(1:floor(size(spec,1)/2)+1,:))))
+colorbar, axis xy, xlabel 'Time [s]', ylabel 'Frequency [Hz]'
+minMaxColor = caxis;
+caxis(max(minMaxColor)+[-80 0])
+
+
+%% replace phase spectrogram by random values (bad phase)
+
+ampSpec = abs(spec);     % amplitude spectrogram
+phaseSpec = angle(spec); % phase spectrogram
+
+randomPhase = 2*pi*rand(size(ampSpec)); % example of bad phase spectrogram
+
+newSpec = ampSpec .* exp(1i*randomPhase); % spectrogram with bad phase
+
+
+%% construct canonical dual window
+
+dualWin = zeros(size(win)); % initialize dual window
+
+for n = 1:length(dualWin)
+    dualWin(n) = win(n) / (winLength2*sum(abs(win((mod(n-1,timeStretchFactor*winShift2)+1):timeStretchFactor*winShift2:end)).^2)); % calculate canonical dual window
+end
+
+ figure, plot([win dualWin/max(dualWin)],'linewidth',2), grid on
+
+
+%% apply Griffin-Lim algorithm to correct phase spectrogram
+
+specUpdate = newSpec; % initialize optimization variable (spectrogram)
+
+for m = 1:iterationNumber % main loop of Griffin-Lim algorithm
+    result = zeros(timeStretchFactor*length(zeroPadData),1); % initialize time signal
+    t = 1:winLength2; % time index to be updated inside for loop
+    
+    for n = 1:timeSegmentNum % loop of inverse STFT
+        result(t) = result(t) + dualWin.*ifftshift(ifft(specUpdate(:,n),'symmetric'))*winLength2; % inverse STFT
+        t = t + timeStretchFactor*winShift2; % update time index (data shifting)
+    end
+    
+    t = 1:winLength2; % time index to be updated inside for loop
+    
+    for n = 1:timeSegmentNum % loop of STFT
+        specUpdate(:,n) = fft(fftshift(win.*result(t))); % substitute spectrum into spectrogram
+        t = t + timeStretchFactor*winShift2; % update time index (data shifting)
+    end
+    
+    specUpdate = ampSpec .* exp(1i*angle(specUpdate)); % replace current amplitude by the original amplitude spectrogram
+end
+
+result(1:winLength2) = [];         % delete padded zeros at beginning
+result(end-winLength2+1:end) = []; % delete padded zeros at end
+
+figure, plot(result,'linewidth',2), grid on
+figure, spectrogram(result,win,(7/8)*winLength,max(2^12,winLength),fs,'yaxis'), minMaxColor = caxis; caxis(max(minMaxColor)+[-80 0])
+
+
+%% listen to time-stretched MTLB
+
+soundsc(result,fs)
+
+
